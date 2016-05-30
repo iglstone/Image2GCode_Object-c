@@ -15,7 +15,8 @@
 #import "ViewController.h"
 #import "opencv2/imgcodecs/ios.h"
 
-#define POINTSCALE 3
+#define POINTSCALE 0.3
+#define AREATHRESH 16
 
 @interface ViewController ()
 {
@@ -32,8 +33,9 @@
     [super viewDidLoad];
     m_mutArray = [NSMutableArray new];
     self.view.backgroundColor = [UIColor lightGrayColor];
+    NSString *imageName = @"lena.png";//@"voice@3x.png";
     
-    UIButton *btn = [[UIButton alloc] initWithFrame:CGRectMake(480, 20, 100, 40)];
+    UIButton *btn = [[UIButton alloc] initWithFrame:CGRectMake(30, 560, 100, 40)];
     btn.backgroundColor = [UIColor orangeColor];
     [self.view addSubview:btn];
     [btn addTarget:self action:@selector(doneDraw) forControlEvents:UIControlEventTouchUpInside];
@@ -42,9 +44,8 @@
     NSString *pa = [self documentsPath:@"guolong2.gcode"];
     [[NSFileManager defaultManager] createFileAtPath:pa contents:nil attributes:nil];
     
-    UIImage* image = [UIImage imageNamed:@"lena.png"];
-//    UIImage* image = [UIImage imageNamed:@"bb.png"];
-    
+//    UIImage* image = [UIImage imageNamed:@"lena.png"];
+    UIImage* image = [UIImage imageNamed:imageName];
     
     UIImageToMat(image, cvImage);
     
@@ -79,30 +80,121 @@
         cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.5, 1.5);
         
         cv::Mat thresh;
-        cv::threshold(gray, thresh, 190, 255, 0);
-        
-        UIImageView *newView = [UIImageView new];
-        newView.frame = CGRectMake(30, 30, 320,480);
-        [self.view addSubview:newView];
-        newView.image = MatToUIImage(thresh);
+        cv::threshold(gray, thresh, 180, 255, 0);
         
         int row = thresh.rows; //480
         int clo = thresh.cols; //320
         
-        cvFindContours(<#CvArr *image#>, <#CvMemStorage *storage#>, <#CvSeq **first_contour#>)
+        row = row > 100 ? row :row*2;
+        clo = clo > 100 ? clo : clo*2;
         
-        //int m = thresh.channels();
-        for (int i = 0 ; i < row; i = i+3) {
+        CvMemStorage *mem = cvCreateMemStorage();
+        CvSeq *pContour = NULL;
+        CvSeq *pConInner = NULL;
+        
+        CvMat cvThreshMat = thresh;
+        int num = cvFindContours(&cvThreshMat, mem, &pContour);
+        cvDrawContours(&cvThreshMat, pContour, cvScalar(255), cvScalar(255), 2, CV_FILLED);
+        
+        //newView.image = MatToUIImage(thresh);
+        for (; pContour != NULL; pContour = pContour->h_next)
+        {
+            // 内轮廓循环，似乎没什么用
+            BOOL nei = NO;
+            for (pConInner = pContour->v_next; pConInner != NULL; pConInner = pConInner->h_next)
+            {
+                nei = YES;
+                break;
+                // 内轮廓面积
+                //float dConArea = fabs(cvContourArea(pConInner, CV_WHOLE_SEQ));
+                //printf("%f\n", dConArea);
+            }
+            if (nei) {
+                continue;
+            }
+            
+            float dConArea = fabs(cvContourArea(pContour, CV_WHOLE_SEQ));
+            if (dConArea < AREATHRESH) {
+                continue;
+            }
+            printf("%f\n", dConArea);
+            CvRect rect = cvBoundingRect(pContour,0);
+            
+            printf("%f\n", dConArea);
+            for (int j = rect.y; j < rect.y + rect.height ; j+=1) {
+                NSString *tt = @"";
+                BOOL t1 = NO;
+                BOOL t0 = NO;
+                
+                for (int i = rect.x; i < rect.x + rect.width; i+=1) {
+                    int t =thresh.at<uchar>(j,i);
+                    if (t == 255) {
+                        
+                        /***防止重复去刻画***/
+                        thresh.at<uchar>(j,i) = 0;//或者使用图片区域裁剪的方法来实现。
+                        /******************/
+                        
+                        if (t1 == NO) { //第一次碰到 1
+                            
+                            t1 = YES;//设置t1
+                            [m_mutArray addObject: [self modeString:@"G0" x:j y:i]];
+                            [m_mutArray addObject: @"G1 Z2.0\n"];
+                            [m_mutArray addObject: [self modeString:@"G1" x:j y:i]];
+                            
+                        }else { //连续两点是 1
+                            //或者这个不用添加也行。
+                            [m_mutArray addObject: [self modeString:@"G1" x:j y:i]];
+                        }
+                        t0 = NO; // 0点不连续
+                    } else {
+                        if (t0 == NO) { //第一次是0
+                            if (t1 == YES) { //连续两点是1，遇到第一个0点
+                                [m_mutArray addObject: [self modeString:@"G1" x:j y:i]];
+                                [m_mutArray addObject: @"G1 Z5\n"];
+                                t1 = NO;// 1点不连续
+                            }
+                            t0 = YES;
+                        } else { //第二次是还是0
+                            
+                        }
+                        t1 = NO;
+                    }
+                    
+                    tt = [tt stringByAppendingString:[NSString stringWithFormat:@" %d", t==255?1:0]];
+                }
+                NSLog(@"%@",tt);
+            }
+            
+            cvRectangle(&cvThreshMat, cvPoint(rect.x, rect.y), cvPoint(rect.x + rect.width, rect.y + rect.height), cvScalar(188), 1, 8, 0);
+        }
+        
+        cv::Mat dst;
+        dst = cv::Mat(cvThreshMat.rows, cvThreshMat.cols, cvThreshMat.type, cvThreshMat.data.fl);
+        
+        UIImageView *newView = [UIImageView new];
+        newView.frame = CGRectMake(30, 30, clo, row);
+        [self.view addSubview:newView];
+        newView.image = MatToUIImage(dst);
+//        newView.image = MatToUIImage(thresh);
+        NSLog(@"contours num: %d", num);
+        
+        UIImageView *ann = [UIImageView new];
+        ann.frame = CGRectMake(60+clo, 30, clo, row);
+        [self.view addSubview:ann];
+        ann.image = [UIImage imageNamed:imageName];
+        
+        //未优化的路径算法，供参考。
+        /*
+        for (int i = 0 ; i < row; i = i+2) {
             NSString *tmp = @"";
             
             BOOL t1 = NO;
             BOOL t0 = NO;
             
             for (int j = 0; j < clo; j = j+2) { // in one line
-//                int t =thresh.at<cv::Vec3b>(i,j)[0];
                 int t =thresh.at<uchar>(i,j);
                 
-                tmp = [tmp stringByAppendingString:[NSString stringWithFormat:@" %d", t]];
+                tmp = [tmp stringByAppendingString:[NSString stringWithFormat:@" %d", t==255?1:0]];
                 
                 if (t == 255) {
                     if (t1 == NO) { //第一次碰到 1
@@ -132,50 +224,21 @@
             }
             NSLog(@"%@", tmp);
         }
-        /*
-        for (int i = 0 ; i < row; i = i+1) {
-            [m_mutArray addObject:@"G1 Z5.0\n"];
-            [m_mutArray addObject:[self modeString:@"G0" x:i y:0]];
-            BOOL conti = NO;
-            BOOL tt = NO;
-            for (int j = 0; j < clo; j = j+1) { // in one line
-                int t =thresh.at<cv::Vec3b>(i,j)[0];
-                if (t == 255) {
-                    if (conti == NO) { //第一次碰到 1
-                        
-                        conti = YES;
-                        [m_mutArray addObject: [self modeString:@"G0" x:i y:j]];
-                        [m_mutArray addObject: @"G1 Z0.0\n"];
-
-                    }else { //连续两点是 1
-                        [m_mutArray addObject: [self modeString:@"G1" x:i y:j]];
-                    }
-                }else {
-                    conti = NO;
-                    if (tt == NO) {//第一次是0
-                        tt = YES;
-                        [m_mutArray addObject: @"G1 Z5\n"];
-                    }else { //第二次是0
-                        // noting
-                    }
-                }
-            }
-        }
         */
     }
     
-    UIImageView *ann = [UIImageView new];
-    ann.frame = CGRectMake(400, 400, 300, 360);
-    [self.view addSubview:ann];
-    ann.image = [UIImage imageNamed:@"aa"];
-    
-//    UIImageView *newView = [UIImageView new];
-//    newView.frame = CGRectMake(30, 30, 96, 112);
-//    [self.view addSubview:newView];
-//    newView.image = MatToUIImage(cvImage);
-    
-    
     NSLog(@"ccc");
+}
+
+- (void)logGrayCvMat :(cv::Mat )mat {
+    for (int i = 0; i < mat.cols; i += 3) {
+        NSString *tmp = @"";
+        for (int j = 0 ; j < mat.rows; j += 3) {
+            int t =mat.at<uchar>(i,j);
+            tmp = [tmp stringByAppendingString:[NSString stringWithFormat:@" %d", t]];
+        }
+        NSLog(@"%@", tmp);
+    }
 }
 
 - (NSString *)modeString:(NSString *)mode x:(float)x y:(float)y {
